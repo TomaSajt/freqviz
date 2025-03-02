@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+hound = "3.5.1"
 num-complex = "0.4.6"
+num-traits = "0.2.19"
 raylib = "5.0.2" 
