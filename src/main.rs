@@ -52,7 +52,7 @@ fn write_sample() {
     let mut writer = hound::WavWriter::create("sine.wav", spec).unwrap();
     let amplitude = i16::MAX as f64;
     for t in (0..44100).map(|x| x as f64) {
-        let sample = 0.3 * (t * 261.6256 / 44100.0 * TAU).sin();
+        let sample =  0.5 * (t * 261.6256 / 44100.0 * TAU).sin();
 
         if sample > 1.0 {
             panic!("Sample is cutting off!");
@@ -60,7 +60,7 @@ fn write_sample() {
         writer.write_sample((sample * amplitude) as i16).unwrap();
     }
     for t in (0..44100).map(|x| x as f64) {
-        let sample = 0.3 * (t * 329.6276 / 44100.0 * TAU).sin();
+        let sample = 0.7 * (t * 329.6276 / 44100.0 * TAU).sin();
 
         if sample > 1.0 {
             panic!("Sample is cutting off!");
@@ -68,7 +68,7 @@ fn write_sample() {
         writer.write_sample((sample * amplitude) as i16).unwrap();
     }
     for t in (0..44100).map(|x| x as f64) {
-        let sample = 0.3 * (t * 391.9954 / 44100.0 * TAU).sin();
+        let sample = 0.6 * (t * 391.9954 / 44100.0 * TAU).sin();
 
         if sample > 1.0 {
             panic!("Sample is cutting off!");
@@ -99,8 +99,8 @@ fn main() {
         println!("{:?}", ifft(&bruh));
     }
 
-    //let mut reader = hound::WavReader::open("samples/120_G#_Leader_01_53_SP.wav").unwrap();
-    let mut reader = hound::WavReader::open("sine.wav").unwrap();
+    let mut reader = hound::WavReader::open("samples/120_G#_Leader_01_53_SP.wav").unwrap();
+    //let mut reader = hound::WavReader::open("sine.wav").unwrap();
 
     println!("{:?}", reader.spec());
 
@@ -124,7 +124,7 @@ fn main() {
     println!("max_val: {}", max_val);
     println!("Asd: {}", asd);
 
-    let (mut rl, thread) = raylib::init().size(2048, 480).title("Hello, World").build();
+    let (mut rl, thread) = raylib::init().size(2000, 700).title("Hello, World").build();
 
     let mut kernel_size: usize = 2048;
     let mut time: f64 = 0.0;
@@ -157,7 +157,7 @@ fn main() {
             for x in 0..w {
                 let prog = x as f32 / w as f32;
 
-                let rot_per_sec = lerp(0.0, 1200.0, prog);
+                let rot_per_sec = lerp(0.0, 1800.0, prog);
                 let rot_per_sample = rot_per_sec / 44100.0;
                 let fract_rot_per_sample = rot_per_sample * kernel_size as f32;
                 let i = fract_rot_per_sample as i32;
@@ -173,7 +173,9 @@ fn main() {
                     x as i32,
                     0,
                     x as i32,
-                    (res[i].abs() * 3.0 * h as f64) as i32,
+                    // *2 multiplier because I haven't added the logic to merge the m/n and (n-m)/n
+                    // frquencies
+                    (res[i].abs() * 2.0 * h as f64) as i32,
                     Color::BLACK,
                 );
             }
