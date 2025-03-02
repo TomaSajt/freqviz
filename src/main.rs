@@ -99,8 +99,8 @@ fn main() {
     }
 
     //let mut reader = hound::WavReader::open("samples/120_G#_Leader_01_53_SP.wav").unwrap();
-    let mut reader = hound::WavReader::open("samples/124_Fs_Upright_408_SP_01.wav").unwrap();
-    //let mut reader = hound::WavReader::open("sine.wav").unwrap();
+    //let mut reader = hound::WavReader::open("samples/124_Fs_Upright_408_SP_01.wav").unwrap();
+    let mut reader = hound::WavReader::open("sine.wav").unwrap();
 
     println!("{:?}", reader.spec());
 
@@ -180,10 +180,21 @@ fn main() {
         let spinner_freqs: Vec<Complex64> = fft(&data);
 
         let mut real_freqs: Vec<(f64, f64)> = vec![(0.0, 0.0); kernel_size / 2 + 1];
-        real_freqs[0] = (spinner_freqs[0].re(), 0.0);
+
+        // we know that spinner_freqs[i]*exp(i/n*tau*t)+spinner_freqs[n-i]*exp(-i/n*tau*t) has to sum to a real number
+        // this way we know that = spinner_freqs[i] is the complex conjugate of spinner_freqs[n-i]
+
+        // we don't want negative amplitudes
+        // if it happens, we just store a half-turn phaseshift instead
+        real_freqs[0] = (spinner_freqs[0].abs(), spinner_freqs[0].arg());
         assert!(spinner_freqs[0].im().abs() < 0.001);
-        real_freqs[kernel_size / 2] = (spinner_freqs[kernel_size / 2].re(), 0.0);
+
+        real_freqs[kernel_size / 2] = (
+            spinner_freqs[kernel_size / 2].abs(),
+            spinner_freqs[kernel_size / 2].arg(),
+        );
         assert!(spinner_freqs[kernel_size / 2].im().abs() < 0.001);
+
         for i in 1..(kernel_size / 2) {
             // (a+bi)*exp(wit)+(a-bi)*exp(-wit) = 2a*cos(wt)-2b*cos(wt) = 2*sqrt(a^2+b^2)*cos(wt+atan2(b,a))
             real_freqs[i] = (2.0 * spinner_freqs[i].abs(), spinner_freqs[i].arg());
