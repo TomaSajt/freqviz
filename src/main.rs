@@ -1,3 +1,15 @@
+use std::{
+    collections::{vec_deque, VecDeque},
+    ops::Rem,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+mod record_wav;
+
 use std::f64::consts::TAU;
 
 use raylib::prelude::*;
@@ -30,14 +42,14 @@ fn fft_helper(data: &Vec<Complex64>, sign: i32) -> Vec<Complex64> {
     return res;
 }
 
-fn fft(data: &Vec<Complex64>) -> Vec<Complex64> {
+pub fn fft(data: &Vec<Complex64>) -> Vec<Complex64> {
     return fft_helper(data, -1)
         .iter()
         .map(|x| x / data.len() as f64)
         .collect();
 }
 
-fn ifft(data: &Vec<Complex64>) -> Vec<Complex64> {
+pub fn ifft(data: &Vec<Complex64>) -> Vec<Complex64> {
     return fft_helper(data, 1);
 }
 
@@ -86,45 +98,107 @@ fn write_sample() {
     }
 }
 
-fn main() {
-    write_sample();
+pub fn do_the_thing() {}
+
+fn main() -> Result<(), anyhow::Error> {
+    println!("HELLO WORLD");
 
     {
-        let data: Vec<Complex64> = vec![1.0.into(), 10.0.into(), 100.0.into(), 1000.0.into()];
+        {
+            let data: Vec<Complex64> = vec![1.0.into(), 10.0.into(), 100.0.into(), 1000.0.into()];
 
-        println!("{:?}", data);
-        let bruh = fft(&data);
-        println!("{:?}", bruh);
-        println!("{:?}", ifft(&bruh));
+            println!("{:?}", data);
+            let bruh = fft(&data);
+            println!("{:?}", bruh);
+            println!("{:?}", ifft(&bruh));
+        }
+
+        //let mut reader = hound::WavReader::open("samples/120_G#_Leader_01_53_SP.wav").unwrap();
+        //let mut reader = hound::WavReader::open("samples/124_Fs_Upright_408_SP_01.wav").unwrap();
+        //let mut reader = hound::WavReader::open("Beethoven_Sonate_n14_1er_mvt.wav").unwrap();
+        let mut reader = hound::WavReader::open("sine.wav").unwrap();
+
+        println!("{:?}", reader.spec());
+
+        let channels = reader.spec().channels as usize;
+        let bits = reader.spec().bits_per_sample;
+        let max_val: i32 = 1 << (bits - 1);
+
+        let all_int_samples: Vec<_> = reader
+            .samples::<i32>()
+            .step_by(channels)
+            .map(|x| x.unwrap())
+            .collect();
+
+        let all_samples: Vec<f64> = all_int_samples
+            .iter()
+            .map(|x| x.clone() as f64 / max_val as f64)
+            .map(|x| if x > 1.0 { panic!("nooo") } else { x })
+            .collect();
+
+        let asd: i32 = all_int_samples.into_iter().max().unwrap();
+        println!("max_val: {}", max_val);
+        println!("Asd: {}", asd);
     }
 
-    //let mut reader = hound::WavReader::open("samples/120_G#_Leader_01_53_SP.wav").unwrap();
-    //let mut reader = hound::WavReader::open("samples/124_Fs_Upright_408_SP_01.wav").unwrap();
-    let mut reader = hound::WavReader::open("sine.wav").unwrap();
+    let host = cpal::default_host();
 
-    println!("{:?}", reader.spec());
+    // Set up the input device and stream with the default input config.
+    let device = host
+        .default_input_device()
+        .expect("failed to find input device");
 
-    let channels = reader.spec().channels as usize;
-    let bits = reader.spec().bits_per_sample;
-    let max_val: i32 = 1 << (bits - 1);
+    println!("Default input device: {}", device.name()?);
 
-    let all_int_samples: Vec<_> = reader
-        .samples::<i32>()
-        .step_by(channels)
-        .map(|x| x.unwrap())
-        .collect();
+    let config = device
+        .default_input_config()
+        .expect("Failed to get default input config");
 
-    let all_samples: Vec<f64> = all_int_samples
-        .iter()
-        .map(|x| x.clone() as f64 / max_val as f64)
-        .map(|x| if x > 1.0 { panic!("nooo") } else { x })
-        .collect();
+    let samples_per_sec = config.config().sample_rate.0.clone();
 
-    let asd: i32 = all_int_samples.into_iter().max().unwrap();
-    println!("max_val: {}", max_val);
-    println!("Asd: {}", asd);
+    println!("Default input config: {:?}", config);
 
-    let samples_per_sec = reader.spec().sample_rate;
+    // A flag to indicate that recording is in progress.
+    println!("Begin recording...");
+
+    assert_eq!(config.config().channels, 2);
+
+    // Run the input stream on a separate thread.
+    let err_fn = move |err| {
+        eprintln!("an error occurred on stream: {}", err);
+    };
+
+    let channel_count = config.config().channels as usize;
+
+    let deque_mutex = Arc::new(Mutex::new(VecDeque::<f64>::new()));
+
+    let deque_mutex_2 = deque_mutex.clone();
+
+    let stream = match config.sample_format() {
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            &config.into(),
+            move |data: &[f32], _: &_| {
+                assert_eq!(data.len().rem(channel_count), 0);
+                let mut deque = deque_mutex_2.lock().unwrap();
+                deque.push_back(1.0);
+                //println!("{:?}", deque.len());
+                //println!("data len {:?}", data.len());
+                for sample in data {
+                    deque.push_back(sample.clone() as f64);
+                }
+                //println!("deque len {:?}", deque.len());
+            },
+            err_fn,
+            None,
+        )?,
+        sample_format => {
+            return Err(anyhow::Error::msg(format!(
+                "Unsupported sample format '{sample_format}'"
+            )))
+        }
+    };
+
+    stream.play()?;
 
     let (mut rl, thread) = raylib::init().size(2000, 700).title("Hello, World").build();
 
@@ -138,7 +212,7 @@ fn main() {
         let dt = rl.get_frame_time();
         time += dt as f64;
 
-        let mut curr_sample_start = (time * (reader.spec().sample_rate as f64)) as usize;
+        let curr_sample_start = (time * (samples_per_sec as f64)) as usize;
         println!("sample_start={}", curr_sample_start);
 
         if rl.is_key_pressed(KeyboardKey::KEY_KP_ADD) {
@@ -166,17 +240,21 @@ fn main() {
         let w = d.get_screen_width();
         let h = d.get_screen_height();
 
-        if curr_sample_start + kernel_size >= all_samples.len() {
-            time = 0.0;
-            curr_sample_start = 0;
+        let data;
+        let mut deque = deque_mutex.lock().unwrap();
+        println!("{}", deque.len());
+        while deque.len() > kernel_size {
+            deque.pop_front();
         }
-
-        let samples = &all_samples[curr_sample_start..(curr_sample_start + kernel_size)];
-
-        let data: Vec<Complex64> = samples
+        if deque.len() < kernel_size {
+            continue;
+        }
+        data = deque
             .iter()
             .map(|x| Into::<Complex64>::into(x.clone()))
             .collect();
+        drop(deque);
+
         let spinner_freqs: Vec<Complex64> = fft(&data);
 
         let mut real_freqs: Vec<(f64, f64)> = vec![(0.0, 0.0); kernel_size / 2 + 1];
@@ -228,4 +306,6 @@ fn main() {
             );
         }
     }
+
+    Ok(())
 }

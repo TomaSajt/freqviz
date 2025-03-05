@@ -4,6 +4,8 @@
 
 pkgs.mkShell {
   packages = [
+    pkgs.alsa-lib
+    pkgs.pkg-config
     pkgs.cmake
     pkgs.xorg.libX11
     pkgs.xorg.libXrandr
