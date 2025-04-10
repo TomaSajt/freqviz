@@ -75,54 +75,16 @@ fn test_fft() {
     assert!(d);
 }
 
-fn write_sample() {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: 44100,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let mut writer = hound::WavWriter::create("sine.wav", spec).unwrap();
-    let amplitude = i16::MAX as f64;
-    for t in (0..44100).map(|x| x as f64) {
-        let sample = 1.0 * (t * 261.6256 / 44100.0 * TAU).sin();
-        assert!(sample.abs() <= 1.0, "Sample is cutting off!");
-        writer.write_sample((sample * amplitude) as i16).unwrap();
-    }
-    for t in (0..44100).map(|x| x as f64) {
-        let sample = 1.0 * (t * 329.6276 / 44100.0 * TAU).sin();
-        assert!(sample.abs() <= 1.0, "Sample is cutting off!");
-        writer.write_sample((sample * amplitude) as i16).unwrap();
-    }
-    for t in (0..44100).map(|x| x as f64) {
-        let sample = 1.0 * (t * 391.9954 / 44100.0 * TAU).sin();
-        assert!(sample.abs() <= 1.0, "Sample is cutting off!");
-        writer.write_sample((sample * amplitude) as i16).unwrap();
-    }
-    for t in (0..44100).map(|x| x as f64) {
-        let sample = 1.0 * (t * 261.6256 / 44100.0 * TAU).sin();
-        assert!(sample.abs() <= 1.0, "Sample is cutting off!");
-        writer.write_sample((sample * amplitude) as i16).unwrap();
-    }
-    for t in (0..44100).map(|x| x as f64) {
-        let sample =
-            0.5 * (t * 261.6256 / 44100.0 * TAU).sin() + 0.5 * (t * 329.6276 / 44100.0 * TAU).sin();
-        assert!(sample.abs() <= 1.0, "Sample is cutting off!");
-        writer.write_sample((sample * amplitude) as i16).unwrap();
-    }
-    for t in (0..(44100 * 3)).map(|x| x as f64) {
-        let sample = 0.33 * (t * 261.6256 / 44100.0 * TAU).sin()
-            + 0.33 * (t * 329.6276 / 44100.0 * TAU).sin()
-            + 0.33 * (t * 391.9954 / 44100.0 * TAU).sin();
-        assert!(sample.abs() <= 1.0, "Sample is cutting off!");
-        writer.write_sample((sample * amplitude) as i16).unwrap();
-    }
-}
-
 fn update_state(rl: &mut RaylibHandle, state: &mut AppState) {
     let dt = rl.get_frame_time() as f64;
     state.time += dt;
+
+    if rl.is_key_down(KeyboardKey::KEY_W) {
+        state.height_scale *= 5.0.powf(dt);
+    }
+    if rl.is_key_down(KeyboardKey::KEY_S) {
+        state.height_scale /= 5.0.powf(dt);
+    }
 
     if rl.is_key_pressed(KeyboardKey::KEY_D) {
         state.kernel_size *= 2;
@@ -136,18 +98,14 @@ fn update_state(rl: &mut RaylibHandle, state: &mut AppState) {
     if rl.is_key_down(KeyboardKey::KEY_DOWN) {
         state.range /= 2.0.powf(dt);
     }
-    if rl.is_key_down(KeyboardKey::KEY_W) {
-        state.height_scale *= 5.0.powf(dt);
-    }
-    if rl.is_key_down(KeyboardKey::KEY_S) {
-        state.height_scale /= 5.0.powf(dt);
-    }
     if rl.is_key_down(KeyboardKey::KEY_RIGHT) {
         state.center += state.range * 0.5 * dt;
     }
     if rl.is_key_down(KeyboardKey::KEY_LEFT) {
         state.center -= state.range * 0.5 * dt;
     }
+    state.center += -0.03 * state.range * rl.get_mouse_wheel_move_v().x as f64;
+    state.range *= 0.9.powf(rl.get_mouse_wheel_move_v().y as f64);
 }
 
 fn make_audio_stream(
@@ -202,8 +160,6 @@ fn range_transform(l1: f64, r1: f64, l2: f64, r2: f64, val: f64) -> f64 {
 }
 
 fn main() -> Result<(), anyhow::Error> {
-    // write_sample();
-
     let deque_mutex = Arc::new(Mutex::new(VecDeque::<f64>::new()));
     let (audio_stream, samples_per_sec) = make_audio_stream(deque_mutex.clone())?;
     audio_stream.play()?;
@@ -249,7 +205,7 @@ fn main() -> Result<(), anyhow::Error> {
                 .collect::<Vec<_>>()
         };
 
-        let spinner_freqs: Vec<Complex64> = fft(&data);
+        let spinner_freqs = fft(&data);
 
         let mut real_freqs: Vec<(f64, f64)> = vec![(0.0, 0.0); state.kernel_size / 2 + 1];
 
@@ -277,12 +233,22 @@ fn main() -> Result<(), anyhow::Error> {
 
         let mut d = rl.begin_drawing(&thread);
         d.clear_background(Color::WHITE);
-        d.draw_text("Hello", 10, 10, 20, Color::BISQUE);
 
         let w = d.get_screen_width();
         let h = d.get_screen_height();
 
-        for freq in [110.0, 220.0, 440.0, 880.0, 1760.0] {
+        for freq in [
+            0.0,
+            110.0,
+            110.0 * 2.0,
+            110.0 * 4.0,
+            110.0 * 8.0,
+            110.0 * 16.0,
+            110.0 * 32.0,
+            110.0 * 64.0,
+            110.0 * 128.0,
+            samples_per_sec as f64 / 2.0,
+        ] {
             let x = range_transform(
                 state.center - state.range / 2.0,
                 state.center + state.range / 2.0,
@@ -310,12 +276,12 @@ fn main() -> Result<(), anyhow::Error> {
             let fract_rot_per_sample = rot_per_sample * kernel_size as f64;
             let i = fract_rot_per_sample.floor() as i32;
             if i < 0 {
-                d.draw_line(x as i32, 0, x as i32, h, Color::RED);
+                //d.draw_line(x as i32, 0, x as i32, h, Color::RED);
                 continue;
             }
             let i = i as usize;
             if i >= num_freqs {
-                d.draw_line(x as i32, 0, x as i32, h, Color::RED);
+                //d.draw_line(x as i32, 0, x as i32, h, Color::RED);
                 continue;
             }
 
