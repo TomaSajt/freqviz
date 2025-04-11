@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    f64::consts::TAU,
     sync::{Arc, Mutex},
 };
 
@@ -8,22 +9,13 @@ use cpal::{
     Stream,
 };
 
-use std::f64::consts::TAU;
-
-use raylib::prelude::*;
+use eframe::{
+    egui::{self, pos2, vec2, Button, Color32, Frame, Rect, Stroke},
+    emath,
+    epaint::PathStroke,
+};
 
 use num_complex::{Complex64, ComplexFloat};
-
-struct AppState {
-    time: f64,
-    kernel_size: usize,
-    center: f64,
-    range: f64,
-    height_scale: f64,
-    deque_mutex: Arc<Mutex<VecDeque<f64>>>,
-    audio_stream: Stream,
-    samples_per_sec: u32,
-}
 
 fn fft_helper(data: &Vec<Complex64>, sign: i32) -> Vec<Complex64> {
     let n = data.len();
@@ -75,39 +67,6 @@ fn test_fft() {
     assert!(d);
 }
 
-fn update_state(rl: &mut RaylibHandle, state: &mut AppState) {
-    let dt = rl.get_frame_time() as f64;
-    state.time += dt;
-
-    if rl.is_key_down(KeyboardKey::KEY_W) {
-        state.height_scale *= 5.0.powf(dt);
-    }
-    if rl.is_key_down(KeyboardKey::KEY_S) {
-        state.height_scale /= 5.0.powf(dt);
-    }
-
-    if rl.is_key_pressed(KeyboardKey::KEY_D) {
-        state.kernel_size *= 2;
-    }
-    if state.kernel_size > 1 && rl.is_key_pressed(KeyboardKey::KEY_A) {
-        state.kernel_size /= 2;
-    }
-    if rl.is_key_down(KeyboardKey::KEY_UP) {
-        state.range *= 2.0.powf(dt);
-    }
-    if rl.is_key_down(KeyboardKey::KEY_DOWN) {
-        state.range /= 2.0.powf(dt);
-    }
-    if rl.is_key_down(KeyboardKey::KEY_RIGHT) {
-        state.center += state.range * 0.5 * dt;
-    }
-    if rl.is_key_down(KeyboardKey::KEY_LEFT) {
-        state.center -= state.range * 0.5 * dt;
-    }
-    state.center += -0.03 * state.range * rl.get_mouse_wheel_move_v().x as f64;
-    state.range *= 0.9.powf(rl.get_mouse_wheel_move_v().y as f64);
-}
-
 fn make_audio_stream(
     deque_mutex: Arc<Mutex<VecDeque<f64>>>,
 ) -> Result<(Stream, u32), anyhow::Error> {
@@ -135,7 +94,6 @@ fn make_audio_stream(
             &config.into(),
             move |data: &[f32], _: &_| {
                 let mut deque = deque_mutex.lock().unwrap();
-                // TODO: figure out if we need to skip per channel
                 for sample in data.iter().step_by(2) {
                     deque.push_back(sample.clone() as f64);
                 }
@@ -155,145 +113,195 @@ fn make_audio_stream(
     Ok((stream, samples_per_sec))
 }
 
-fn range_transform(l1: f64, r1: f64, l2: f64, r2: f64, val: f64) -> f64 {
-    (r2 - l2) / (r1 - l1) * (val - l1) + l2
+fn main() -> Result<(), eframe::Error> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 700.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "My egui App",
+        options,
+        Box::new(|cc| Ok(Box::<MyApp>::new(MyApp::new().unwrap()))),
+    )
 }
 
-fn main() -> Result<(), anyhow::Error> {
-    let deque_mutex = Arc::new(Mutex::new(VecDeque::<f64>::new()));
-    let (audio_stream, samples_per_sec) = make_audio_stream(deque_mutex.clone())?;
-    audio_stream.play()?;
+#[derive(PartialEq)]
+enum VizMode {
+    Column,
+    TopLine,
+}
 
-    let mut state = AppState {
-        time: 0.0,
+struct MyApp {
+    _audio_stream: Stream,
 
-        kernel_size: 2048,
+    kernel_size: usize,
+    deque_mutex: Arc<Mutex<VecDeque<f64>>>,
+    samples_per_sec: u32,
+    viz_mode: VizMode,
+}
 
-        center: 600.0,
-        range: 1200.0,
-        height_scale: 1.0,
+impl MyApp {
+    fn new() -> Result<Self, anyhow::Error> {
+        let deque_mutex = Arc::new(Mutex::new(VecDeque::<f64>::new()));
+        let (audio_stream, samples_per_sec) = make_audio_stream(deque_mutex.clone())?;
+        audio_stream.play()?;
 
-        deque_mutex,
-        audio_stream,
-        samples_per_sec,
-    };
+        Ok(MyApp {
+            _audio_stream: audio_stream,
 
-    let (mut rl, thread) = raylib::init().size(2000, 700).title("FreqViz").build();
-
-    while !rl.window_should_close() {
-        update_state(&mut rl, &mut state);
-
-        let curr_sample_start = (state.time * (samples_per_sec as f64)) as usize;
-        println!("curr_sample_start={curr_sample_start}");
-
-        let kernel_size = state.kernel_size;
-
-        let data = {
-            let mut deque = state.deque_mutex.lock().unwrap();
-            println!("{}", deque.len());
-            // only keep as much data in the deque as we need
-            while deque.len() > state.kernel_size {
-                deque.pop_front();
-            }
-            // pad the data with zeroes if not enough data
-            while deque.len() < state.kernel_size {
-                deque.push_front(0.0);
-            }
-            deque
-                .iter()
-                .map(|x| Into::<Complex64>::into(x.clone()))
-                .collect::<Vec<_>>()
-        };
-
-        let spinner_freqs = fft(&data);
-
-        let mut real_freqs: Vec<(f64, f64)> = vec![(0.0, 0.0); state.kernel_size / 2 + 1];
-
-        // we know that spinner_freqs[i]*exp(i/n*tau*t)+spinner_freqs[n-i]*exp(-i/n*tau*t) has to sum to a real number
-        // this way we know that = spinner_freqs[i] is the complex conjugate of spinner_freqs[n-i]
-
-        // we don't want negative amplitudes
-        // if it happens, we just store a half-turn phaseshift instead
-
-        real_freqs[0] = (spinner_freqs[0].abs(), spinner_freqs[0].arg());
-        assert!(spinner_freqs[0].im().abs() < 0.001);
-
-        real_freqs[kernel_size / 2] = (
-            spinner_freqs[kernel_size / 2].abs(),
-            spinner_freqs[kernel_size / 2].arg(),
-        );
-        assert!(spinner_freqs[kernel_size / 2].im().abs() < 0.001);
-
-        for i in 1..(kernel_size / 2) {
-            // (a+bi)*exp(wit)+(a-bi)*exp(-wit) = 2a*cos(wt)-2b*cos(wt) = 2*sqrt(a^2+b^2)*cos(wt+atan2(b,a))
-            real_freqs[i] = (2.0 * spinner_freqs[i].abs(), spinner_freqs[i].arg());
-        }
-
-        let num_freqs = kernel_size / 2 + 1;
-
-        let mut d = rl.begin_drawing(&thread);
-        d.clear_background(Color::WHITE);
-
-        let w = d.get_screen_width();
-        let h = d.get_screen_height();
-
-        for freq in [
-            0.0,
-            110.0,
-            110.0 * 2.0,
-            110.0 * 4.0,
-            110.0 * 8.0,
-            110.0 * 16.0,
-            110.0 * 32.0,
-            110.0 * 64.0,
-            110.0 * 128.0,
-            samples_per_sec as f64 / 2.0,
-        ] {
-            let x = range_transform(
-                state.center - state.range / 2.0,
-                state.center + state.range / 2.0,
-                0.0,
-                w as f64,
-                freq,
-            ) as i32;
-
-            d.draw_line(x, 0, x, h, Color::BLUE);
-            let text = freq.to_string() + "Hz";
-            let font_size = 20;
-            d.draw_text(
-                &text,
-                x - d.measure_text(&text, font_size) / 2,
-                h - font_size - 10,
-                font_size,
-                Color::BLUEVIOLET,
-            );
-        }
-
-        for x in 0..w {
-            let prog = x as f64 / w as f64;
-            let rot_per_sec = (state.center - state.range / 2.0) + state.range * prog;
-            let rot_per_sample = rot_per_sec / samples_per_sec as f64;
-            let fract_rot_per_sample = rot_per_sample * kernel_size as f64;
-            let i = fract_rot_per_sample.floor() as i32;
-            if i < 0 {
-                //d.draw_line(x as i32, 0, x as i32, h, Color::RED);
-                continue;
-            }
-            let i = i as usize;
-            if i >= num_freqs {
-                //d.draw_line(x as i32, 0, x as i32, h, Color::RED);
-                continue;
-            }
-
-            d.draw_line(
-                x as i32,
-                0,
-                x as i32,
-                (real_freqs[i].0 * h as f64 * state.height_scale) as i32,
-                Color::BLACK,
-            );
-        }
+            kernel_size: 2048,
+            deque_mutex,
+            samples_per_sec,
+            viz_mode: VizMode::Column,
+        })
     }
+}
 
-    Ok(())
+impl eframe::App for MyApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let color = if ui.visuals().dark_mode {
+                Color32::from_additive_luminance(196)
+            } else {
+                Color32::from_black_alpha(240)
+            };
+
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.viz_mode, VizMode::Column, "Column");
+                ui.selectable_value(&mut self.viz_mode, VizMode::TopLine, "Top Line");
+            });
+
+            ui.label(format!("Kernel size: {}", self.kernel_size));
+            ui.horizontal(|ui| {
+                if ui.button("x2").clicked() {
+                    self.kernel_size *= 2;
+                }
+                if ui
+                    .add_enabled(self.kernel_size > 1, Button::new("x0.5"))
+                    .clicked()
+                {
+                    self.kernel_size /= 2;
+                }
+            });
+
+            Frame::canvas(ui.style()).show(ui, |ui| {
+                let kernel_size = self.kernel_size;
+
+                let data = {
+                    let mut deque = self.deque_mutex.lock().unwrap();
+                    // only keep as much data in the deque as we need
+                    while deque.len() > self.kernel_size {
+                        deque.pop_front();
+                    }
+                    // pad the data with zeroes if not enough data
+                    while deque.len() < self.kernel_size {
+                        deque.push_front(0.0);
+                    }
+                    deque
+                        .iter()
+                        .map(|x| Into::<Complex64>::into(x.clone()))
+                        .collect::<Vec<_>>()
+                };
+
+                let spinner_freqs = fft(&data);
+
+                let mut real_freqs: Vec<(f64, f64)> = vec![(0.0, 0.0); kernel_size / 2 + 1];
+
+                // we know that spinner_freqs[i]*exp(i/n*tau*t)+spinner_freqs[n-i]*exp(-i/n*tau*t) has to sum to a real number
+                // this way we know that = spinner_freqs[i] is the complex conjugate of spinner_freqs[n-i]
+
+                // we don't want negative amplitudes
+                // if it happens, we just store a half-turn phaseshift instead
+
+                real_freqs[0] = (spinner_freqs[0].abs(), spinner_freqs[0].arg());
+                assert!(spinner_freqs[0].im().abs() < 0.001);
+
+                real_freqs[kernel_size / 2] = (
+                    spinner_freqs[kernel_size / 2].abs(),
+                    spinner_freqs[kernel_size / 2].arg(),
+                );
+                assert!(spinner_freqs[kernel_size / 2].im().abs() < 0.001);
+
+                for i in 1..(kernel_size / 2) {
+                    // (a+bi)*exp(wit)+(a-bi)*exp(-wit) = 2a*cos(wt)-2b*cos(wt) = 2*sqrt(a^2+b^2)*cos(wt+atan2(b,a))
+                    real_freqs[i] = (2.0 * spinner_freqs[i].abs(), spinner_freqs[i].arg());
+                }
+
+                let num_freqs = kernel_size / 2 + 1;
+
+                let desired_size = ui.available_width() * vec2(1.0, 0.35);
+                let (_id, rect) = ui.allocate_space(desired_size);
+
+                let to_screen = emath::RectTransform::from_to(
+                    Rect::from_x_y_ranges(0.0..=0.15, 1.0..=0.0),
+                    rect,
+                );
+
+                for freq in [
+                    0.0,
+                    110.0,
+                    110.0 * 2.0,
+                    110.0 * 4.0,
+                    110.0 * 8.0,
+                    110.0 * 16.0,
+                    110.0 * 32.0,
+                    110.0 * 64.0,
+                    110.0 * 128.0,
+                    (self.samples_per_sec / 2 + 1) as f32,
+                ] {
+                    let p = emath::remap(
+                        freq,
+                        0.0..=((self.samples_per_sec / 2 + 1) as f32),
+                        0.0..=1.0,
+                    );
+
+                    let text = freq.to_string() + "Hz";
+                    let font_size = 20.0;
+
+                    ui.painter().line_segment(
+                        [to_screen * pos2(p, 0.0), to_screen * pos2(p, 1.0)],
+                        Stroke::new(1.0, Color32::LIGHT_GREEN),
+                    );
+
+                    ui.painter().text(
+                        to_screen * pos2(p, 0.0),
+                        egui::Align2::CENTER_TOP,
+                        text,
+                        egui::FontId {
+                            size: font_size,
+                            family: egui::FontFamily::Monospace,
+                        },
+                        color,
+                    );
+                }
+
+                match self.viz_mode {
+                    VizMode::Column => {
+                        for i in 0..num_freqs {
+                            let p = i as f32 / (num_freqs - 1) as f32;
+                            ui.painter().line_segment(
+                                [
+                                    to_screen * pos2(p, 0.0),
+                                    to_screen * pos2(p, real_freqs[i].0 as f32),
+                                ],
+                                Stroke::new(1.0, color),
+                            );
+                        }
+                    }
+                    VizMode::TopLine => {
+                        let points: Vec<_> = (0..num_freqs)
+                            .map(|i| {
+                                let p = i as f32 / (num_freqs - 1) as f32;
+                                to_screen * pos2(p, real_freqs[i].0 as f32)
+                            })
+                            .collect();
+
+                        ui.painter().line(points, PathStroke::new(1.0, color));
+                    }
+                }
+
+                ui.ctx().request_repaint();
+            });
+        });
+    }
 }

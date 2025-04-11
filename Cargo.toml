@@ -6,7 +6,8 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.97"
 cpal = "0.15.3"
+eframe = "0.31.1"
+egui_extras = { version = "0.31.1", features = ["default"] }
 hound = "3.5.1"
 num-complex = "0.4.6"
 num-traits = "0.2.19"
-raylib = "5.0.2" 

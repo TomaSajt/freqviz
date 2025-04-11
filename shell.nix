@@ -4,16 +4,12 @@
 
 pkgs.mkShell {
   packages = [
-    pkgs.alsa-lib
     pkgs.pkg-config
-    pkgs.cmake
-    pkgs.xorg.libX11
-    pkgs.xorg.libXrandr
-    pkgs.xorg.libXinerama
-    pkgs.xorg.libXcursor
-    pkgs.xorg.libXi
-    pkgs.libGL
-    pkgs.rustPlatform.bindgenHook
+    pkgs.alsa-lib
   ];
-  env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.libGL ];
+  env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+    pkgs.libGL
+    pkgs.wayland
+    pkgs.libxkbcommon
+  ];
 }
