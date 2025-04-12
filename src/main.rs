@@ -84,12 +84,12 @@ fn spinner_freqs_to_real_freqs(spinner_freqs: Vec<Complex64>) -> Vec<(f64, f64)>
     real_freqs
 }
 
-fn is_almost_same(a: Complex64, b: Complex64) -> bool {
-    (a - b).abs() < 0.00000001
-}
-
 #[test]
 fn test_fft() {
+    fn is_almost_same(a: Complex64, b: Complex64) -> bool {
+        (a - b).abs() < 0.00000001
+    }
+
     let a: Vec<Complex64> = vec![1.0.into(), 10.0.into(), 100.0.into(), 1000.0.into()];
     let b = fft(&a);
     let c = ifft(&b);
@@ -105,7 +105,7 @@ fn make_audio_stream(
     // Set up the input device and stream with the default input config.
     let device = host
         .default_input_device()
-        .expect("failed to find input device");
+        .expect("Failed to find input device");
 
     println!("Default input device: {}", device.name()?);
 
@@ -144,13 +144,12 @@ fn make_audio_stream(
 }
 
 fn main() -> Result<(), eframe::Error> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 700.0]),
-        ..Default::default()
-    };
     eframe::run_native(
-        "My egui App",
-        options,
+        "FreqViz",
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 700.0]),
+            ..Default::default()
+        },
         Box::new(|_cc| Ok(Box::<MyApp>::new(MyApp::new().unwrap()))),
     )
 }
@@ -169,7 +168,7 @@ struct MyApp {
     samples_per_sec: u32,
     viz_mode: VizMode,
     history_texture: Option<TextureHandle>,
-    scanline_y: usize,
+    scanline_prog: usize,
 }
 
 impl MyApp {
@@ -186,7 +185,7 @@ impl MyApp {
             samples_per_sec,
             viz_mode: VizMode::Column,
             history_texture: None,
-            scanline_y: 0,
+            scanline_prog: 0,
         })
     }
 
@@ -272,6 +271,8 @@ impl MyApp {
 
             ui.ctx().request_repaint();
         });
+
+        ui.add_space(30.0);
     }
 
     fn draw_history_image(&mut self, ui: &mut Ui, real_freqs: &Vec<(f64, f64)>) {
@@ -279,43 +280,43 @@ impl MyApp {
         if self
             .history_texture
             .as_ref()
-            .map(|tex| tex.size()[0])
+            .map(|tex| tex.size()[1])
             .unwrap_or(0)
             != real_freqs.len()
         {
             self.history_texture = Some(ui.ctx().load_texture(
                 "history_texture",
-                ColorImage::new([real_freqs.len(), 1000], Color32::BLACK),
+                ColorImage::new([1000, real_freqs.len()], Color32::BLACK),
                 TextureOptions::NEAREST,
             ));
-            self.scanline_y = 0;
+            self.scanline_prog = 0;
         }
 
         let data_line_image = ColorImage::from_gray_iter(
-            [real_freqs.len(), 1],
+            [1, real_freqs.len()],
             real_freqs
                 .iter()
                 .map(|a| clamp_max(a.0 * 255.0, 255.0) as u8),
         );
 
-        let eraser_image = ColorImage::new([real_freqs.len(), 1], Color32::LIGHT_GREEN);
+        let eraser_image = ColorImage::new([1, real_freqs.len()], Color32::LIGHT_GREEN);
 
         if let Some(tex) = &mut self.history_texture {
             tex.set_partial(
-                [0, self.scanline_y],
+                [self.scanline_prog, 0],
                 data_line_image,
                 TextureOptions::NEAREST,
             );
             tex.set_partial(
-                [0, (self.scanline_y + 1) % 1000],
-                eraser_image.clone(),
+                [(self.scanline_prog + 1) % 1000, 0],
+                eraser_image,
                 TextureOptions::NEAREST,
             );
         }
 
         ui.image(self.history_texture.as_ref().unwrap());
 
-        self.scanline_y = (self.scanline_y + 1) % 1000;
+        self.scanline_prog = (self.scanline_prog + 1) % 1000;
     }
 
     fn get_audio_buffer_data(&mut self, len: usize) -> Vec<Complex64> {
