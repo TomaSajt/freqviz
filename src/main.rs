@@ -96,7 +96,7 @@ fn test_fft() {
     assert!(d);
 }
 
-fn make_audio_stream(
+fn make_microphone_input_audio_stream(
     deque_mutex: Arc<Mutex<VecDeque<f64>>>,
 ) -> Result<(Stream, u32), anyhow::Error> {
     let host = cpal::default_host();
@@ -112,11 +112,16 @@ fn make_audio_stream(
         .default_input_config()
         .expect("Failed to get default input config");
 
-    let samples_per_sec = config.config().sample_rate.0.clone();
+    let samples_per_sec = config.config().sample_rate.0;
+
+
+    println!("sample rate: {}", samples_per_sec);
 
     println!("Default input config: {:?}", config);
 
     assert_eq!(config.config().channels, 2);
+
+    let mut num_samples = 0;
 
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
@@ -125,6 +130,8 @@ fn make_audio_stream(
                 let mut deque = deque_mutex.lock().unwrap();
                 for sample in data.iter().step_by(2) {
                     deque.push_back(sample.clone() as f64);
+                    num_samples += 1;
+                    println!("{}", num_samples);
                 }
             },
             |err| {
@@ -140,6 +147,78 @@ fn make_audio_stream(
     };
 
     Ok((stream, samples_per_sec))
+}
+
+fn make_output_audio_stream(
+    freq: f64,
+    deque_mutex: Arc<Mutex<VecDeque<f64>>>,
+) -> Result<(Stream, u32), anyhow::Error> {
+    use cpal::traits::DeviceTrait;
+    use cpal::traits::HostTrait;
+    use cpal::SampleFormat;
+
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .expect("Failed to find input device");
+
+    println!("Default output device: {}", device.name()?);
+
+    let supported_configs_ranges = device
+        .supported_output_configs()
+        .expect("error while querying configs")
+        .collect::<Vec<_>>();
+
+    println!("{:?}", supported_configs_ranges);
+
+    let supported_config_range = supported_configs_ranges
+        .iter()
+        .find(|x| x.sample_format() == SampleFormat::F32 && x.channels() == 2)
+        .expect("no f32 support found?");
+
+    let supported_config = supported_config_range.with_sample_rate(cpal::SampleRate(44100));
+
+    let sample_format = supported_config.sample_format();
+    let sample_rate = supported_config.sample_rate().0;
+    let channel_count = supported_config.channels();
+
+    println!("sample rate: {}", sample_rate);
+
+    let mut num_samples = 0;
+    let mut curr_channel = 0;
+    let stream = match sample_format {
+        SampleFormat::F32 => device.build_output_stream(
+            &supported_config.into(),
+            move |data: &mut [f32], _: &_| {
+                let mut deque = deque_mutex.lock().unwrap();
+                println!("len: {}", data.len());
+                for sample in data.as_mut() {
+                    if curr_channel == 0 {
+                        let t = num_samples as f64 / sample_rate as f64;
+                        let val = (freq * TAU * t).sin();
+                        *sample = val as f32;
+                        deque.push_back(val);
+                        num_samples += 1;
+                        println!("{}", num_samples);
+                    } else {
+                        *sample = 0.0;
+                    }
+                    curr_channel = (curr_channel + 1) % channel_count;
+                }
+            },
+            |err| eprintln!("an error occurred on the output audio stream: {}", err),
+            None,
+        )?,
+        SampleFormat::I16 => {
+            todo!()
+        }
+        SampleFormat::U16 => {
+            todo!()
+        }
+        sample_format => panic!("Unsupported sample format '{sample_format}'"),
+    };
+
+    Ok((stream, sample_rate))
 }
 
 fn main() -> Result<(), eframe::Error> {
@@ -159,8 +238,14 @@ enum VizMode {
     TopLine,
 }
 
+enum AudioStreamMode {
+    Off,
+    File(Stream),
+    Microphone(Stream),
+}
+
 struct MyApp {
-    _audio_stream: Stream,
+    audio_stream_mode: AudioStreamMode,
 
     kernel_size: usize,
     deque_mutex: Arc<Mutex<VecDeque<f64>>>,
@@ -173,19 +258,40 @@ struct MyApp {
 impl MyApp {
     fn new() -> Result<Self, anyhow::Error> {
         let deque_mutex = Arc::new(Mutex::new(VecDeque::<f64>::new()));
-        let (audio_stream, samples_per_sec) = make_audio_stream(deque_mutex.clone())?;
-        audio_stream.play()?;
 
         Ok(MyApp {
-            _audio_stream: audio_stream,
-
+            audio_stream_mode: AudioStreamMode::Off,
             kernel_size: 2048,
             deque_mutex,
-            samples_per_sec,
+            samples_per_sec: 44100,
             viz_mode: VizMode::Column,
             history_texture: None,
             scanline_prog: 0,
         })
+    }
+
+    fn toggle_audio_stream_mode(&mut self) {
+        self.deque_mutex.lock().unwrap().clear();
+        match self.audio_stream_mode {
+            AudioStreamMode::Off => {
+                let (input_audio_stream, samples_per_sec) =
+                    make_microphone_input_audio_stream(self.deque_mutex.clone()).unwrap();
+                input_audio_stream.play().unwrap();
+                self.audio_stream_mode = AudioStreamMode::Microphone(input_audio_stream);
+                self.samples_per_sec = samples_per_sec;
+            }
+            AudioStreamMode::Microphone(_) => {
+                let (output_audio_stream, samples_per_sec) =
+                    make_output_audio_stream(440.0, self.deque_mutex.clone()).unwrap();
+                output_audio_stream.play().unwrap();
+                self.audio_stream_mode = AudioStreamMode::File(output_audio_stream);
+                self.samples_per_sec = samples_per_sec;
+            }
+            AudioStreamMode::File(_) => {
+                self.audio_stream_mode = AudioStreamMode::Off;
+                self.samples_per_sec = 44100;
+            }
+        }
     }
 
     fn draw_height_graph(&mut self, ui: &mut Ui, real_freqs: &Vec<(f64, f64)>) {
@@ -344,6 +450,10 @@ impl MyApp {
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            if ui.button("Toggle audio stream mode").clicked() {
+                self.toggle_audio_stream_mode()
+            }
+
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.viz_mode, VizMode::Column, "Column");
                 ui.selectable_value(&mut self.viz_mode, VizMode::TopLine, "Top Line");
