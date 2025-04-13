@@ -4,19 +4,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
-    Stream,
-};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
-use eframe::{
-    egui::{
-        self, pos2, remap_clamp, vec2, Button, Color32, ColorImage, Frame, Rect, ScrollArea,
-        Stroke, TextureHandle, TextureOptions, Ui,
-    },
-    emath,
-    epaint::PathStroke,
-};
+use eframe::egui::{self, pos2, vec2, Color32};
 
 use num_complex::{Complex64, ComplexFloat};
 
@@ -98,7 +88,7 @@ fn test_fft() {
 
 fn make_microphone_input_audio_stream(
     deque_mutex: Arc<Mutex<VecDeque<f64>>>,
-) -> Result<(Stream, u32), anyhow::Error> {
+) -> Result<(cpal::Stream, u32), anyhow::Error> {
     let host = cpal::default_host();
 
     // Set up the input device and stream with the default input config.
@@ -112,24 +102,31 @@ fn make_microphone_input_audio_stream(
         .default_input_config()
         .expect("Failed to get default input config");
 
-    let samples_per_sec = config.config().sample_rate.0;
+    let sample_rate = config.config().sample_rate.0;
 
-    println!("sample rate: {}", samples_per_sec);
+    println!("sample rate: {}", sample_rate);
 
     println!("Default input config: {:?}", config);
 
-    assert_eq!(config.config().channels, 2);
+    let channel_cnt = config.config().channels as usize;
 
-    let mut num_samples = 0;
+    let mut sample_cnt = 0;
+    let mut curr_channel = 0;
 
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
             &config.into(),
             move |data: &[f32], _: &_| {
+                assert_eq!(data.len() % channel_cnt, 0);
                 let mut deque = deque_mutex.lock().unwrap();
-                for sample in data.iter().step_by(2) {
-                    deque.push_back(sample.clone() as f64);
-                    num_samples += 1;
+                for sample in data {
+                    if curr_channel == 0 {
+                        deque.push_back(sample.clone() as f64);
+                    }
+                    curr_channel = (curr_channel + 1) % channel_cnt;
+                    if curr_channel == 0 {
+                        sample_cnt += 1;
+                    }
                 }
             },
             |err| {
@@ -144,17 +141,13 @@ fn make_microphone_input_audio_stream(
         }
     };
 
-    Ok((stream, samples_per_sec))
+    Ok((stream, sample_rate))
 }
 
 fn make_output_audio_stream(
     freq: f64,
     deque_mutex: Arc<Mutex<VecDeque<f64>>>,
-) -> Result<(Stream, u32), anyhow::Error> {
-    use cpal::traits::DeviceTrait;
-    use cpal::traits::HostTrait;
-    use cpal::SampleFormat;
-
+) -> Result<(cpal::Stream, u32), anyhow::Error> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -171,44 +164,47 @@ fn make_output_audio_stream(
 
     let supported_config_range = supported_configs_ranges
         .iter()
-        .find(|x| x.sample_format() == SampleFormat::F32 && x.channels() == 2)
+        .find(|x| x.sample_format() == cpal::SampleFormat::F32 && x.channels() == 2)
         .expect("no f32 support found?");
 
     let supported_config = supported_config_range.with_sample_rate(cpal::SampleRate(44100));
 
     let sample_format = supported_config.sample_format();
     let sample_rate = supported_config.sample_rate().0;
-    let channel_count = supported_config.channels();
+    let channel_cnt = supported_config.channels() as usize;
 
     println!("sample rate: {}", sample_rate);
 
-    let mut num_samples = 0;
+    let mut sample_cnt = 0;
     let mut curr_channel = 0;
     let stream = match sample_format {
-        SampleFormat::F32 => device.build_output_stream(
+        cpal::SampleFormat::F32 => device.build_output_stream(
             &supported_config.into(),
             move |data: &mut [f32], _: &_| {
+                assert_eq!(data.len() % channel_cnt, 0);
                 let mut deque = deque_mutex.lock().unwrap();
                 for sample in data.as_mut() {
                     if curr_channel == 0 {
-                        let t = num_samples as f64 / sample_rate as f64;
+                        let t = sample_cnt as f64 / sample_rate as f64;
                         let val = (freq * TAU * t).sin();
                         *sample = val as f32;
                         deque.push_back(val);
-                        num_samples += 1;
                     } else {
                         *sample = 0.0;
                     }
-                    curr_channel = (curr_channel + 1) % channel_count;
+                    curr_channel = (curr_channel + 1) % channel_cnt;
+                    if curr_channel == 0 {
+                        sample_cnt += 1;
+                    }
                 }
             },
             |err| eprintln!("an error occurred on the output audio stream: {}", err),
             None,
         )?,
-        SampleFormat::I16 => {
+        cpal::SampleFormat::I16 => {
             todo!()
         }
-        SampleFormat::U16 => {
+        cpal::SampleFormat::U16 => {
             todo!()
         }
         sample_format => panic!("Unsupported sample format '{sample_format}'"),
@@ -224,7 +220,7 @@ fn main() -> Result<(), eframe::Error> {
             viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 700.0]),
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::<MyApp>::new(MyApp::new().unwrap()))),
+        Box::new(|cc| Ok(Box::<MyApp>::new(MyApp::new(cc)))),
     )
 }
 
@@ -236,8 +232,8 @@ enum VizMode {
 
 enum AudioStreamMode {
     Off,
-    File(Stream),
-    Microphone(Stream),
+    File(cpal::Stream),
+    Microphone(cpal::Stream),
 }
 
 struct MyApp {
@@ -245,25 +241,23 @@ struct MyApp {
 
     kernel_size: usize,
     deque_mutex: Arc<Mutex<VecDeque<f64>>>,
-    samples_per_sec: u32,
+    sample_rate: u32,
     viz_mode: VizMode,
-    history_texture: Option<TextureHandle>,
+    history_texture: Option<egui::TextureHandle>,
     scanline_prog: usize,
 }
 
 impl MyApp {
-    fn new() -> Result<Self, anyhow::Error> {
-        let deque_mutex = Arc::new(Mutex::new(VecDeque::<f64>::new()));
-
-        Ok(MyApp {
+    fn new(_cc: &eframe::CreationContext) -> MyApp {
+        MyApp {
             audio_stream_mode: AudioStreamMode::Off,
             kernel_size: 2048,
-            deque_mutex,
-            samples_per_sec: 44100,
+            deque_mutex: Arc::new(Mutex::new(VecDeque::<f64>::new())),
+            sample_rate: 44100,
             viz_mode: VizMode::Column,
             history_texture: None,
             scanline_prog: 0,
-        })
+        }
     }
 
     fn toggle_audio_stream_mode(&mut self) {
@@ -274,113 +268,120 @@ impl MyApp {
                     make_microphone_input_audio_stream(self.deque_mutex.clone()).unwrap();
                 input_audio_stream.play().unwrap();
                 self.audio_stream_mode = AudioStreamMode::Microphone(input_audio_stream);
-                self.samples_per_sec = samples_per_sec;
+                self.sample_rate = samples_per_sec;
             }
             AudioStreamMode::Microphone(_) => {
                 let (output_audio_stream, samples_per_sec) =
                     make_output_audio_stream(440.0, self.deque_mutex.clone()).unwrap();
                 output_audio_stream.play().unwrap();
                 self.audio_stream_mode = AudioStreamMode::File(output_audio_stream);
-                self.samples_per_sec = samples_per_sec;
+                self.sample_rate = samples_per_sec;
             }
             AudioStreamMode::File(_) => {
                 self.audio_stream_mode = AudioStreamMode::Off;
-                self.samples_per_sec = 44100;
+                self.sample_rate = 44100;
             }
         }
     }
 
-    fn draw_height_graph(&mut self, ui: &mut Ui, real_freqs: &Vec<(f64, f64)>) {
+    fn draw_height_graph(&mut self, ui: &mut egui::Ui, real_freqs: &Vec<(f64, f64)>) {
         let main_line_col = if ui.visuals().dark_mode {
             Color32::from_additive_luminance(196)
         } else {
             Color32::from_black_alpha(240)
         };
 
-        ScrollArea::horizontal().show(ui, |ui| {
-            Frame::canvas(ui.style()).show(ui, |ui| {
-                let desired_size = ui.available_width() * vec2(4.0, 0.35);
-                let (_id, rect) = ui.allocate_space(desired_size);
+        egui::ScrollArea::horizontal().show(ui, |ui| {
+            egui::Frame::canvas(ui.style())
+                .inner_margin(egui::Margin {
+                    left: 30,
+                    right: 50,
+                    top: 0,
+                    bottom: 25,
+                })
+                .show(ui, |ui| {
+                    let desired_size =
+                        vec2(ui.available_width() * 4.0, ui.available_height() * 0.5);
+                    let (_id, rect) = ui.allocate_space(desired_size);
 
-                let to_screen = emath::RectTransform::from_to(
-                    Rect::from_x_y_ranges(0.0..=1.0, 1.0..=0.0),
-                    rect,
-                );
-
-                let num_freqs = real_freqs.len();
-
-                for freq in [
-                    0.0,
-                    110.0,
-                    110.0 * 2.0,
-                    110.0 * 4.0,
-                    110.0 * 8.0,
-                    110.0 * 16.0,
-                    110.0 * 32.0,
-                    110.0 * 64.0,
-                    110.0 * 128.0,
-                    (self.samples_per_sec / 2 + 1) as f32,
-                ] {
-                    let p = emath::remap(
-                        freq,
-                        0.0..=((self.samples_per_sec / 2 + 1) as f32),
-                        0.0..=1.0,
+                    let to_screen = egui::emath::RectTransform::from_to(
+                        egui::Rect::from_x_y_ranges(0.0..=1.0, 1.0..=0.0),
+                        rect,
                     );
 
-                    let text = freq.to_string() + "Hz";
-                    let font_size = 20.0;
+                    let num_freqs = real_freqs.len();
 
-                    ui.painter().line_segment(
-                        [to_screen * pos2(p, 0.0), to_screen * pos2(p, 1.0)],
-                        Stroke::new(1.0, Color32::LIGHT_GREEN),
-                    );
+                    match self.viz_mode {
+                        VizMode::Column => {
+                            for i in 0..num_freqs {
+                                let p = i as f32 / (num_freqs - 1) as f32;
+                                ui.painter().line_segment(
+                                    [
+                                        to_screen * pos2(p, 0.0),
+                                        to_screen * pos2(p, real_freqs[i].0 as f32),
+                                    ],
+                                    egui::Stroke::new(1.0, main_line_col),
+                                );
+                            }
+                        }
+                        VizMode::TopLine => {
+                            let points: Vec<_> = (0..num_freqs)
+                                .map(|i| {
+                                    let p = i as f32 / (num_freqs - 1) as f32;
+                                    to_screen * pos2(p, real_freqs[i].0 as f32)
+                                })
+                                .collect();
 
-                    ui.painter().text(
-                        to_screen * pos2(p, 0.0),
-                        egui::Align2::CENTER_TOP,
-                        text,
-                        egui::FontId {
-                            size: font_size,
-                            family: egui::FontFamily::Monospace,
-                        },
-                        main_line_col,
-                    );
-                }
-
-                match self.viz_mode {
-                    VizMode::Column => {
-                        for i in 0..num_freqs {
-                            let p = i as f32 / (num_freqs - 1) as f32;
-                            ui.painter().line_segment(
-                                [
-                                    to_screen * pos2(p, 0.0),
-                                    to_screen * pos2(p, real_freqs[i].0 as f32),
-                                ],
-                                Stroke::new(1.0, main_line_col),
-                            );
+                            ui.painter()
+                                .line(points, egui::epaint::PathStroke::new(1.0, main_line_col));
                         }
                     }
-                    VizMode::TopLine => {
-                        let points: Vec<_> = (0..num_freqs)
-                            .map(|i| {
-                                let p = i as f32 / (num_freqs - 1) as f32;
-                                to_screen * pos2(p, real_freqs[i].0 as f32)
-                            })
-                            .collect();
 
-                        ui.painter()
-                            .line(points, PathStroke::new(1.0, main_line_col));
+                    ui.painter().line_segment(
+                        [to_screen * pos2(0.0, 0.0), to_screen * pos2(1.0, 0.0)],
+                        egui::Stroke::new(1.0, main_line_col),
+                    );
+
+                    for freq in [
+                        0.0,
+                        110.0,
+                        110.0 * 2.0,
+                        110.0 * 4.0,
+                        110.0 * 8.0,
+                        110.0 * 16.0,
+                        110.0 * 32.0,
+                        110.0 * 64.0,
+                        110.0 * 128.0,
+                        (self.sample_rate / 2) as f32,
+                    ] {
+                        let p = egui::remap(freq, 0.0..=((self.sample_rate / 2) as f32), 0.0..=1.0);
+
+                        let text = freq.to_string() + "Hz";
+                        let font_size = 20.0;
+
+                        ui.painter().line_segment(
+                            [to_screen * pos2(p, 0.0), to_screen * pos2(p, 1.0)],
+                            egui::Stroke::new(1.0, Color32::LIGHT_GREEN),
+                        );
+
+                        ui.painter().text(
+                            to_screen * pos2(p, 0.0),
+                            egui::Align2::CENTER_TOP,
+                            text,
+                            egui::FontId {
+                                size: font_size,
+                                family: egui::FontFamily::Monospace,
+                            },
+                            main_line_col,
+                        );
                     }
-                }
 
-                ui.ctx().request_repaint();
-            });
+                    ui.ctx().request_repaint();
+                });
         });
-
-        ui.add_space(30.0);
     }
 
-    fn draw_history_image(&mut self, ui: &mut Ui, real_freqs: &Vec<(f64, f64)>) {
+    fn draw_history_image(&mut self, ui: &mut egui::Ui, real_freqs: &Vec<(f64, f64)>) {
         // Upload texture if it hasn't been already or if the data width changed
         if self
             .history_texture
@@ -391,39 +392,39 @@ impl MyApp {
         {
             self.history_texture = Some(ui.ctx().load_texture(
                 "history_texture",
-                ColorImage::new([1000, real_freqs.len()], Color32::BLACK),
-                TextureOptions::NEAREST,
+                egui::ColorImage::new([1000, real_freqs.len()], Color32::BLACK),
+                egui::TextureOptions::NEAREST,
             ));
             self.scanline_prog = 0;
         }
 
-        let data_line_image = ColorImage {
+        let data_line_image = egui::ColorImage {
             size: [1, real_freqs.len()],
             pixels: real_freqs
                 .iter()
                 .map(|a| {
-                    let y = remap_clamp(a.0, 0.0..=1.0, 0.0..=255.0) as u8;
+                    let y = egui::remap_clamp(a.0, 0.0..=1.0, 0.0..=255.0) as u8;
                     Color32::from_rgb(y, y, 0)
                 })
                 .collect(),
         };
 
-        let eraser_image = ColorImage::new([1, real_freqs.len()], Color32::LIGHT_GREEN);
+        let eraser_image = egui::ColorImage::new([1, real_freqs.len()], Color32::LIGHT_GREEN);
 
         if let Some(tex) = &mut self.history_texture {
             tex.set_partial(
                 [self.scanline_prog, 0],
                 data_line_image,
-                TextureOptions::NEAREST,
+                egui::TextureOptions::NEAREST,
             );
             tex.set_partial(
                 [(self.scanline_prog + 1) % 1000, 0],
                 eraser_image,
-                TextureOptions::NEAREST,
+                egui::TextureOptions::NEAREST,
             );
         }
 
-        ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
             ui.image(self.history_texture.as_ref().unwrap());
         });
 
@@ -450,9 +451,19 @@ impl MyApp {
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.label(format!(
+                "Current audio stream mode: {}",
+                match self.audio_stream_mode {
+                    AudioStreamMode::Off => "Off",
+                    AudioStreamMode::File(_) => "File",
+                    AudioStreamMode::Microphone(_) => "Microphone",
+                }
+            ));
             if ui.button("Toggle audio stream mode").clicked() {
                 self.toggle_audio_stream_mode()
             }
+
+            ui.separator();
 
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.viz_mode, VizMode::Column, "Column");
@@ -465,12 +476,14 @@ impl eframe::App for MyApp {
                     self.kernel_size *= 2;
                 }
                 if ui
-                    .add_enabled(self.kernel_size > 1, Button::new("x0.5"))
+                    .add_enabled(self.kernel_size > 1, egui::Button::new("x0.5"))
                     .clicked()
                 {
                     self.kernel_size /= 2;
                 }
             });
+
+            ui.separator();
 
             let data = self.get_audio_buffer_data(self.kernel_size);
             let spinner_freqs = fft(&data);
