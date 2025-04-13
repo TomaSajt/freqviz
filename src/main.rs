@@ -58,7 +58,7 @@ pub fn ifft(data: &Vec<Complex64>) -> Vec<Complex64> {
 }
 
 fn spinner_freqs_to_real_freqs(spinner_freqs: Vec<Complex64>) -> Vec<(f64, f64)> {
-    let mut real_freqs: Vec<(f64, f64)> = vec![(0.0, 0.0); spinner_freqs.len() + 1];
+    let mut real_freqs: Vec<(f64, f64)> = vec![(0.0, 0.0); spinner_freqs.len() / 2 + 1];
 
     // we know that spinner_freqs[i]*exp(i/n*tau*t)+spinner_freqs[n-i]*exp(-i/n*tau*t) has to sum to a real number
     // this way we know that = spinner_freqs[i] is the complex conjugate of spinner_freqs[n-i]
@@ -114,7 +114,6 @@ fn make_microphone_input_audio_stream(
 
     let samples_per_sec = config.config().sample_rate.0;
 
-
     println!("sample rate: {}", samples_per_sec);
 
     println!("Default input config: {:?}", config);
@@ -131,7 +130,6 @@ fn make_microphone_input_audio_stream(
                 for sample in data.iter().step_by(2) {
                     deque.push_back(sample.clone() as f64);
                     num_samples += 1;
-                    println!("{}", num_samples);
                 }
             },
             |err| {
@@ -191,7 +189,6 @@ fn make_output_audio_stream(
             &supported_config.into(),
             move |data: &mut [f32], _: &_| {
                 let mut deque = deque_mutex.lock().unwrap();
-                println!("len: {}", data.len());
                 for sample in data.as_mut() {
                     if curr_channel == 0 {
                         let t = num_samples as f64 / sample_rate as f64;
@@ -199,7 +196,6 @@ fn make_output_audio_stream(
                         *sample = val as f32;
                         deque.push_back(val);
                         num_samples += 1;
-                        println!("{}", num_samples);
                     } else {
                         *sample = 0.0;
                     }
@@ -301,80 +297,84 @@ impl MyApp {
             Color32::from_black_alpha(240)
         };
 
-        Frame::canvas(ui.style()).show(ui, |ui| {
-            let desired_size = ui.available_width() * vec2(1.0, 0.35);
-            let (_id, rect) = ui.allocate_space(desired_size);
+        ScrollArea::horizontal().show(ui, |ui| {
+            Frame::canvas(ui.style()).show(ui, |ui| {
+                let desired_size = ui.available_width() * vec2(4.0, 0.35);
+                let (_id, rect) = ui.allocate_space(desired_size);
 
-            let to_screen =
-                emath::RectTransform::from_to(Rect::from_x_y_ranges(0.0..=0.15, 1.0..=0.0), rect);
-
-            let num_freqs = real_freqs.len();
-
-            for freq in [
-                0.0,
-                110.0,
-                110.0 * 2.0,
-                110.0 * 4.0,
-                110.0 * 8.0,
-                110.0 * 16.0,
-                110.0 * 32.0,
-                110.0 * 64.0,
-                110.0 * 128.0,
-                (self.samples_per_sec / 2 + 1) as f32,
-            ] {
-                let p = emath::remap(
-                    freq,
-                    0.0..=((self.samples_per_sec / 2 + 1) as f32),
-                    0.0..=1.0,
+                let to_screen = emath::RectTransform::from_to(
+                    Rect::from_x_y_ranges(0.0..=1.0, 1.0..=0.0),
+                    rect,
                 );
 
-                let text = freq.to_string() + "Hz";
-                let font_size = 20.0;
+                let num_freqs = real_freqs.len();
 
-                ui.painter().line_segment(
-                    [to_screen * pos2(p, 0.0), to_screen * pos2(p, 1.0)],
-                    Stroke::new(1.0, Color32::LIGHT_GREEN),
-                );
+                for freq in [
+                    0.0,
+                    110.0,
+                    110.0 * 2.0,
+                    110.0 * 4.0,
+                    110.0 * 8.0,
+                    110.0 * 16.0,
+                    110.0 * 32.0,
+                    110.0 * 64.0,
+                    110.0 * 128.0,
+                    (self.samples_per_sec / 2 + 1) as f32,
+                ] {
+                    let p = emath::remap(
+                        freq,
+                        0.0..=((self.samples_per_sec / 2 + 1) as f32),
+                        0.0..=1.0,
+                    );
 
-                ui.painter().text(
-                    to_screen * pos2(p, 0.0),
-                    egui::Align2::CENTER_TOP,
-                    text,
-                    egui::FontId {
-                        size: font_size,
-                        family: egui::FontFamily::Monospace,
-                    },
-                    main_line_col,
-                );
-            }
+                    let text = freq.to_string() + "Hz";
+                    let font_size = 20.0;
 
-            match self.viz_mode {
-                VizMode::Column => {
-                    for i in 0..num_freqs {
-                        let p = i as f32 / (num_freqs - 1) as f32;
-                        ui.painter().line_segment(
-                            [
-                                to_screen * pos2(p, 0.0),
-                                to_screen * pos2(p, real_freqs[i].0 as f32),
-                            ],
-                            Stroke::new(1.0, main_line_col),
-                        );
+                    ui.painter().line_segment(
+                        [to_screen * pos2(p, 0.0), to_screen * pos2(p, 1.0)],
+                        Stroke::new(1.0, Color32::LIGHT_GREEN),
+                    );
+
+                    ui.painter().text(
+                        to_screen * pos2(p, 0.0),
+                        egui::Align2::CENTER_TOP,
+                        text,
+                        egui::FontId {
+                            size: font_size,
+                            family: egui::FontFamily::Monospace,
+                        },
+                        main_line_col,
+                    );
+                }
+
+                match self.viz_mode {
+                    VizMode::Column => {
+                        for i in 0..num_freqs {
+                            let p = i as f32 / (num_freqs - 1) as f32;
+                            ui.painter().line_segment(
+                                [
+                                    to_screen * pos2(p, 0.0),
+                                    to_screen * pos2(p, real_freqs[i].0 as f32),
+                                ],
+                                Stroke::new(1.0, main_line_col),
+                            );
+                        }
+                    }
+                    VizMode::TopLine => {
+                        let points: Vec<_> = (0..num_freqs)
+                            .map(|i| {
+                                let p = i as f32 / (num_freqs - 1) as f32;
+                                to_screen * pos2(p, real_freqs[i].0 as f32)
+                            })
+                            .collect();
+
+                        ui.painter()
+                            .line(points, PathStroke::new(1.0, main_line_col));
                     }
                 }
-                VizMode::TopLine => {
-                    let points: Vec<_> = (0..num_freqs)
-                        .map(|i| {
-                            let p = i as f32 / (num_freqs - 1) as f32;
-                            to_screen * pos2(p, real_freqs[i].0 as f32)
-                        })
-                        .collect();
 
-                    ui.painter()
-                        .line(points, PathStroke::new(1.0, main_line_col));
-                }
-            }
-
-            ui.ctx().request_repaint();
+                ui.ctx().request_repaint();
+            });
         });
 
         ui.add_space(30.0);
@@ -476,9 +476,13 @@ impl eframe::App for MyApp {
             let spinner_freqs = fft(&data);
             let real_freqs = spinner_freqs_to_real_freqs(spinner_freqs);
 
-            self.draw_height_graph(ui, &real_freqs);
+            ui.push_id("height_graph", |ui| {
+                self.draw_height_graph(ui, &real_freqs);
+            });
 
-            self.draw_history_image(ui, &real_freqs);
+            ui.push_id("history", |ui| {
+                self.draw_history_image(ui, &real_freqs);
+            });
         });
     }
 }
