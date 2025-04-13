@@ -11,15 +11,14 @@ use cpal::{
 
 use eframe::{
     egui::{
-        self, pos2, vec2, Button, Color32, ColorImage, Frame, Rect, Stroke, TextureHandle,
-        TextureOptions, Ui,
+        self, pos2, remap_clamp, vec2, Button, Color32, ColorImage, Frame, Rect, ScrollArea,
+        Stroke, TextureHandle, TextureOptions, Ui,
     },
     emath,
     epaint::PathStroke,
 };
 
 use num_complex::{Complex64, ComplexFloat};
-use num_traits::clamp_max;
 
 fn fft_helper(data: &Vec<Complex64>, sign: i32) -> Vec<Complex64> {
     let n = data.len();
@@ -292,12 +291,16 @@ impl MyApp {
             self.scanline_prog = 0;
         }
 
-        let data_line_image = ColorImage::from_gray_iter(
-            [1, real_freqs.len()],
-            real_freqs
+        let data_line_image = ColorImage {
+            size: [1, real_freqs.len()],
+            pixels: real_freqs
                 .iter()
-                .map(|a| clamp_max(a.0 * 255.0, 255.0) as u8),
-        );
+                .map(|a| {
+                    let y = remap_clamp(a.0, 0.0..=1.0, 0.0..=255.0) as u8;
+                    Color32::from_rgb(y, y, 0)
+                })
+                .collect(),
+        };
 
         let eraser_image = ColorImage::new([1, real_freqs.len()], Color32::LIGHT_GREEN);
 
@@ -314,7 +317,9 @@ impl MyApp {
             );
         }
 
-        ui.image(self.history_texture.as_ref().unwrap());
+        ScrollArea::vertical().show(ui, |ui| {
+            ui.image(self.history_texture.as_ref().unwrap());
+        });
 
         self.scanline_prog = (self.scanline_prog + 1) % 1000;
     }
