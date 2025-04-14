@@ -11,3 +11,4 @@ egui_extras = { version = "0.31.1", features = ["default"] }
 hound = "3.5.1"
 num-complex = "0.4.6"
 num-traits = "0.2.19"
+ringbuf = "0.4.8"

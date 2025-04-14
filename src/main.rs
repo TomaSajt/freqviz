@@ -1,217 +1,20 @@
+mod audio;
+mod fft;
+
 use std::{
     collections::VecDeque,
-    f64::consts::TAU,
+    path::Path,
     sync::{Arc, Mutex},
+    thread::JoinHandle,
 };
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use audio::{make_microphone_input_audio_stream, make_output_audio_stream};
+use cpal::traits::StreamTrait;
 
 use eframe::egui::{self, pos2, vec2, Color32};
 
-use num_complex::{Complex64, ComplexFloat};
-
-fn fft_helper(data: &Vec<Complex64>, sign: i32) -> Vec<Complex64> {
-    let n = data.len();
-    assert_eq!(n.count_ones(), 1);
-
-    if n == 1 {
-        return data.clone();
-    }
-
-    let evens = data.iter().step_by(2).cloned().collect::<Vec<_>>();
-    let odds = data.iter().skip(1).step_by(2).cloned().collect::<Vec<_>>();
-
-    let evens_res = fft_helper(&evens, sign);
-    let odds_res = fft_helper(&odds, sign);
-
-    let mut res = vec![Complex64::default(); n];
-    for t in 0..(n / 2) {
-        let w = (sign * t as i32) as f64 / n as f64 * TAU;
-        let xd = Complex64::new(0.0, w).exp();
-
-        res[t] = evens_res[t] + xd * odds_res[t];
-        res[t + n / 2] = evens_res[t] - xd * odds_res[t];
-    }
-
-    return res;
-}
-
-pub fn fft(data: &Vec<Complex64>) -> Vec<Complex64> {
-    return fft_helper(data, -1)
-        .iter()
-        .map(|x| x / data.len() as f64)
-        .collect();
-}
-
-pub fn ifft(data: &Vec<Complex64>) -> Vec<Complex64> {
-    return fft_helper(data, 1);
-}
-
-fn spinner_freqs_to_real_freqs(spinner_freqs: Vec<Complex64>) -> Vec<(f64, f64)> {
-    let mut real_freqs: Vec<(f64, f64)> = vec![(0.0, 0.0); spinner_freqs.len() / 2 + 1];
-
-    // we know that spinner_freqs[i]*exp(i/n*tau*t)+spinner_freqs[n-i]*exp(-i/n*tau*t) has to sum to a real number
-    // this way we know that = spinner_freqs[i] is the complex conjugate of spinner_freqs[n-i]
-
-    // we don't want negative amplitudes
-    // if it happens, we just store a half-turn phaseshift instead
-
-    real_freqs[0] = (spinner_freqs[0].abs(), spinner_freqs[0].arg());
-    assert!(spinner_freqs[0].im().abs() < 0.001);
-
-    real_freqs[spinner_freqs.len() / 2] = (
-        spinner_freqs[spinner_freqs.len() / 2].abs(),
-        spinner_freqs[spinner_freqs.len() / 2].arg(),
-    );
-    assert!(spinner_freqs[spinner_freqs.len() / 2].im().abs() < 0.001);
-
-    for i in 1..(spinner_freqs.len() / 2) {
-        // (a+bi)*exp(wit)+(a-bi)*exp(-wit) = 2a*cos(wt)-2b*cos(wt) = 2*sqrt(a^2+b^2)*cos(wt+atan2(b,a))
-        real_freqs[i] = (2.0 * spinner_freqs[i].abs(), spinner_freqs[i].arg());
-    }
-
-    real_freqs
-}
-
-#[test]
-fn test_fft() {
-    fn is_almost_same(a: Complex64, b: Complex64) -> bool {
-        (a - b).abs() < 0.00000001
-    }
-
-    let a: Vec<Complex64> = vec![1.0.into(), 10.0.into(), 100.0.into(), 1000.0.into()];
-    let b = fft(&a);
-    let c = ifft(&b);
-    let d = a.into_iter().zip(c).all(|x| is_almost_same(x.0, x.1));
-    assert!(d);
-}
-
-fn make_microphone_input_audio_stream(
-    deque_mutex: Arc<Mutex<VecDeque<f64>>>,
-) -> Result<(cpal::Stream, u32), anyhow::Error> {
-    let host = cpal::default_host();
-
-    // Set up the input device and stream with the default input config.
-    let device = host
-        .default_input_device()
-        .expect("Failed to find input device");
-
-    println!("Default input device: {}", device.name()?);
-
-    let config = device
-        .default_input_config()
-        .expect("Failed to get default input config");
-
-    let sample_rate = config.config().sample_rate.0;
-
-    println!("sample rate: {}", sample_rate);
-
-    println!("Default input config: {:?}", config);
-
-    let channel_cnt = config.config().channels as usize;
-
-    let mut sample_cnt = 0;
-    let mut curr_channel = 0;
-
-    let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &config.into(),
-            move |data: &[f32], _: &_| {
-                assert_eq!(data.len() % channel_cnt, 0);
-                let mut deque = deque_mutex.lock().unwrap();
-                for sample in data {
-                    if curr_channel == 0 {
-                        deque.push_back(sample.clone() as f64);
-                    }
-                    curr_channel = (curr_channel + 1) % channel_cnt;
-                    if curr_channel == 0 {
-                        sample_cnt += 1;
-                    }
-                }
-            },
-            |err| {
-                eprintln!("an error occurred on stream: {}", err);
-            },
-            None,
-        )?,
-        sample_format => {
-            return Err(anyhow::Error::msg(format!(
-                "Unsupported sample format '{sample_format}'"
-            )))
-        }
-    };
-
-    Ok((stream, sample_rate))
-}
-
-fn make_output_audio_stream(
-    freq: f64,
-    deque_mutex: Arc<Mutex<VecDeque<f64>>>,
-) -> Result<(cpal::Stream, u32), anyhow::Error> {
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .expect("Failed to find input device");
-
-    println!("Default output device: {}", device.name()?);
-
-    let supported_configs_ranges = device
-        .supported_output_configs()
-        .expect("error while querying configs")
-        .collect::<Vec<_>>();
-
-    println!("{:?}", supported_configs_ranges);
-
-    let supported_config_range = supported_configs_ranges
-        .iter()
-        .find(|x| x.sample_format() == cpal::SampleFormat::F32 && x.channels() == 2)
-        .expect("no f32 support found?");
-
-    let supported_config = supported_config_range.with_sample_rate(cpal::SampleRate(44100));
-
-    let sample_format = supported_config.sample_format();
-    let sample_rate = supported_config.sample_rate().0;
-    let channel_cnt = supported_config.channels() as usize;
-
-    println!("sample rate: {}", sample_rate);
-
-    let mut sample_cnt = 0;
-    let mut curr_channel = 0;
-    let stream = match sample_format {
-        cpal::SampleFormat::F32 => device.build_output_stream(
-            &supported_config.into(),
-            move |data: &mut [f32], _: &_| {
-                assert_eq!(data.len() % channel_cnt, 0);
-                let mut deque = deque_mutex.lock().unwrap();
-                for sample in data.as_mut() {
-                    if curr_channel == 0 {
-                        let t = sample_cnt as f64 / sample_rate as f64;
-                        let val = (freq * TAU * t).sin();
-                        *sample = val as f32;
-                        deque.push_back(val);
-                    } else {
-                        *sample = 0.0;
-                    }
-                    curr_channel = (curr_channel + 1) % channel_cnt;
-                    if curr_channel == 0 {
-                        sample_cnt += 1;
-                    }
-                }
-            },
-            |err| eprintln!("an error occurred on the output audio stream: {}", err),
-            None,
-        )?,
-        cpal::SampleFormat::I16 => {
-            todo!()
-        }
-        cpal::SampleFormat::U16 => {
-            todo!()
-        }
-        sample_format => panic!("Unsupported sample format '{sample_format}'"),
-    };
-
-    Ok((stream, sample_rate))
-}
+use fft::{fft, spinner_freqs_to_real_freqs};
+use num_complex::Complex64;
 
 fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
@@ -232,7 +35,7 @@ enum VizMode {
 
 enum AudioStreamMode {
     Off,
-    File(cpal::Stream),
+    File(cpal::Stream, JoinHandle<()>),
     Microphone(cpal::Stream),
 }
 
@@ -271,13 +74,14 @@ impl MyApp {
                 self.sample_rate = samples_per_sec;
             }
             AudioStreamMode::Microphone(_) => {
-                let (output_audio_stream, samples_per_sec) =
-                    make_output_audio_stream(440.0, self.deque_mutex.clone()).unwrap();
+                let (output_audio_stream, join_handle, samples_per_sec) =
+                    make_output_audio_stream(Path::new("sound.wav"), self.deque_mutex.clone())
+                        .unwrap();
                 output_audio_stream.play().unwrap();
-                self.audio_stream_mode = AudioStreamMode::File(output_audio_stream);
+                self.audio_stream_mode = AudioStreamMode::File(output_audio_stream, join_handle);
                 self.sample_rate = samples_per_sec;
             }
-            AudioStreamMode::File(_) => {
+            AudioStreamMode::File(_, _) => {
                 self.audio_stream_mode = AudioStreamMode::Off;
                 self.sample_rate = 44100;
             }
@@ -455,7 +259,7 @@ impl eframe::App for MyApp {
                 "Current audio stream mode: {}",
                 match self.audio_stream_mode {
                     AudioStreamMode::Off => "Off",
-                    AudioStreamMode::File(_) => "File",
+                    AudioStreamMode::File(_, _) => "File",
                     AudioStreamMode::Microphone(_) => "Microphone",
                 }
             ));
